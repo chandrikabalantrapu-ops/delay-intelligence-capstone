@@ -8,7 +8,7 @@ CAPSTONE PROJECT
 
 3. **Distance:** Delay rates rise with distance: 0.0219 (2.19%) for 0–200 km, 0.1368 (13.68%) for 201–400 km, 0.4364 (43.64%) for 401–600 km, and 0.8523 (85.23%) for 601+ km.
 
-4. **Correlations with delivery time:** The three strongest correlations with `delivery_hours`, excluding the target itself, are `promised_hours` (+0.8372), `distance_km` (+0.4013), and `hub_tier` (+0.3175).
+4. **Correlations with delivery time:** The three strongest correlations with `delivery_hours`, excluding the target itself, are `promised_hours` (+0.8372), `distance_km` (+0.4013), and `n_stops` (+0.3247).
 
 5. **Declared-value transformation:** The median-filled `declared_value_inr` column has a mean of INR 1,533.0542 and a median of INR 1,121.5, while its natural-log transformation has a mean of 7.0277 and a median of 7.0224. The log transformation reduces the influence of the right-skewed declared-value distribution.
 ## Model results (regression)
@@ -42,3 +42,34 @@ Cross-validation favors gradient boosting, whereas validation RMSE favors linear
 ### Final test performance
 
 The selected linear regression model achieved a test R² of **0.9493** and an RMSE of **4.5235 hours**. The test set was held out during model selection and evaluated only once.
+## Model results (classification)
+
+### Baseline and classifier comparison
+
+The blind baseline achieved validation accuracy of **0.7667 (76.67%)**, but its precision, recall, and F1 were all zero because it predicted every parcel as on time and detected no delayed parcels. This demonstrates why accuracy alone is insufficient for an imbalanced classification problem.
+
+Logistic regression achieved validation F1 of **0.8046**, with precision of 0.7778 and recall of 0.8333. The selected decision tree at depth 6 achieved F1 of 0.7470, while the default random forest using all 17 features achieved F1 of 0.7848.
+
+### Feature importance and feature selection
+
+The five bookkeeping noise columns account for approximately **22.44%** of the default random forest's total feature importance. All five rank outside the top seven by F-score, and each has an F-score below 10.
+
+The seven highest-ranked features are `distance_km`, `hub_tier`, `hub_daily_capacity`, `n_stops`, `promised_hours`, `rain_flag`, and `sale_event_flag`. The `SelectKBest` experiment achieved its highest validation F1 of **0.8333** with seven features. The corresponding F1 scores for 5, 10, 12, and 17 features were 0.6988, 0.7857, 0.8049, and 0.7848, respectively.
+
+### Hyperparameter tuning
+
+Grid search achieved a best cross-validation accuracy of 0.8952 and validation F1 of 0.7750. Randomized search achieved a best cross-validation accuracy of 0.8905 and validation F1 of 0.7848. The untuned random forest on the same seven selected features achieved the highest validation F1, **0.8333**, and was selected as the final configuration.
+
+Tuning did not improve validation F1 on this split. This illustrates that a more extensive search does not necessarily improve performance on a relatively small validation set of 180 parcels. The validation result is used for configuration selection, while the held-out test set provides the final evaluation.
+
+### Alert threshold and operational trade-off
+
+The alert threshold was selected using the operational rule: choose the highest threshold whose validation recall is at least 0.80. The chosen threshold was **0.5**, with validation precision of 0.7955, recall of 0.8333, and F1 of 0.8140.
+
+At threshold 0.6, precision improves to 0.8889, but recall falls to 0.7619, below the required 0.80. Therefore, threshold 0.5 is the highest threshold that satisfies the operations rule. It prioritizes detecting delayed parcels while limiting unnecessary alerts.
+
+### Final test performance
+
+At the selected threshold of 0.5, the final model achieved test precision of **0.6889**, recall of **0.7561**, and F1 of **0.7209**, with accuracy of 0.8667. Test recall was lower than validation recall (0.8333), but remained above the required minimum of 0.55. The test set contained only 41 delayed parcels, so each additional missed or detected delayed parcel can noticeably affect the reported metrics.
+
+The final configuration used `SelectKBest(f_classif, k=7)` and a random forest with 100 estimators, unlimited depth, and `min_samples_leaf=1`. The final test set was evaluated once after model and threshold selection.
