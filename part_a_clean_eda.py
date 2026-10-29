@@ -4,176 +4,318 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.shipment_prep import (
-    FEATURES,
-    PROMISED_HOURS,
-    clean_shipments,
-    build_features,
+from src.shipment_prep import clean_shipments, build_features
+
+
+# --------------------------------------------------
+# 1. File paths
+# --------------------------------------------------
+
+ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = ROOT_DIR / "data"
+OUTPUT_DIR = ROOT_DIR / "outputs"
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# --------------------------------------------------
+# 2. Load the input data
+# --------------------------------------------------
+
+raw = pd.read_csv(DATA_DIR / "raw_shipments.csv")
+hubs = pd.read_csv(DATA_DIR / "hubs.csv")
+
+raw_rows = len(raw)
+
+# Remove duplicate rows before calculating cleaning metrics.
+raw_deduplicated = raw.drop_duplicates().copy()
+
+duplicate_rows_removed = raw_rows - len(raw_deduplicated)
+
+
+# --------------------------------------------------
+# 3. Record data-quality checks before cleaning
+# --------------------------------------------------
+
+missing_distance_km_before = int(
+    raw_deduplicated["distance_km"].isna().sum()
 )
 
-ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
-OUTPUTS = ROOT / "outputs"
+missing_parcel_weight_before = int(
+    raw_deduplicated["parcel_weight_kg"].isna().sum()
+)
+
+missing_declared_value_before = int(
+    raw_deduplicated["declared_value"].isna().sum()
+)
+
+missing_payment_mode_before = int(
+    raw_deduplicated["payment_mode"].isna().sum()
+)
+
+sentinel_weight_rows = int(
+    (raw_deduplicated["parcel_weight_kg"] > 100).sum()
+)
+
+service_type_spellings_before = int(
+    raw_deduplicated["service_type"].nunique(dropna=True)
+)
 
 
-def main():
-    OUTPUTS.mkdir(exist_ok=True)
+# --------------------------------------------------
+# 4. Clean the shipment data
+# --------------------------------------------------
 
-    # Load source data
-    raw = pd.read_csv(DATA / "raw_shipments.csv")
-    hubs = pd.read_csv(DATA / "hubs.csv")
+cleaned, medians = clean_shipments(raw_deduplicated)
 
-    # Record initial quality metrics after deduplication
-    deduplicated = raw.drop_duplicates().copy()
+service_type_spellings_after = int(
+    cleaned["service_type"].nunique(dropna=True)
+)
 
-    raw_rows = len(raw)
-    rows_after_dedup = len(deduplicated)
-    duplicate_rows_removed = raw_rows - rows_after_dedup
 
-    service_spellings_before = deduplicated["service_type"].nunique()
-    missing_distance_before = deduplicated["distance_km"].isna().sum()
+# --------------------------------------------------
+# 5. Build features and merge hub information
+# --------------------------------------------------
 
-    weight_before = deduplicated["parcel_weight_kg"].copy()
-    missing_weight_before = (
-        weight_before.isna() & (weight_before <= 100)
+modelling = build_features(cleaned, hubs)
+
+rows_after_hub_merge = len(modelling)
+
+# Delivery time and delayed status are the target columns.
+modelling["delivery_hours"] = pd.to_numeric(
+    modelling["delivery_hours"], errors="coerce"
+)
+
+modelling["is_delayed"] = (
+    modelling["delivery_hours"] > modelling["promised_hours"]
+).astype(int)
+
+
+# --------------------------------------------------
+# 6. Calculate data-quality and descriptive statistics
+# --------------------------------------------------
+
+feature_columns = [
+    "promised_hours",
+    "distance_km",
+    "parcel_weight_kg",
+    "log_declared_value",
+    "n_stops",
+    "rain_flag",
+    "sale_event_flag",
+    "is_cod",
+    "is_weekend",
+    "dispatch_hour",
+    "hub_tier",
+    "hub_daily_capacity",
+    "label_print_batch",
+    "scanner_build_no",
+    "tape_roll_no",
+    "sticker_serial_mod",
+    "shelf_slot_no",
+]
+
+required_columns = feature_columns + [
+    "delivery_hours",
+    "is_delayed",
+]
+
+nulls_in_features_and_target = int(
+    modelling[required_columns].isna().sum().sum()
+)
+
+hours_q1 = modelling["delivery_hours"].quantile(0.25)
+hours_q3 = modelling["delivery_hours"].quantile(0.75)
+hours_iqr = hours_q3 - hours_q1
+
+hours_lower_bound = hours_q1 - 1.5 * hours_iqr
+hours_upper_bound = hours_q3 + 1.5 * hours_iqr
+
+hours_outlier_count = int(
+    (
+        (modelling["delivery_hours"] < hours_lower_bound)
+        | (modelling["delivery_hours"] > hours_upper_bound)
     ).sum()
+)
 
-    missing_declared_before = deduplicated["declared_value"].isna().sum()
-    missing_payment_before = deduplicated["payment_mode"].isna().sum()
+declared_value_mean_inr = modelling["declared_value_inr"].mean()
+declared_value_median_inr = modelling["declared_value_inr"].median()
 
-    # Clean and engineer features
-    clean, medians = clean_shipments(raw)
-    service_spellings_after = clean["service_type"].nunique()
+log_declared_value_mean = modelling["log_declared_value"].mean()
+log_declared_value_median = modelling["log_declared_value"].median()
 
-    modelling = build_features(clean, hubs)
+delay_rate = modelling["is_delayed"].mean()
+delayed_count = int(modelling["is_delayed"].sum())
 
-    if len(modelling) != rows_after_dedup:
-        raise ValueError("Hub merge changed the shipment row count.")
 
-    modelling["is_delayed"] = (
-        modelling["delivery_hours"] > modelling["promised_hours"]
-    ).astype(int)
+# --------------------------------------------------
+# 7. Save Part A data-quality checks
+# --------------------------------------------------
 
-    modelling.to_csv(DATA / "modelling_table.csv", index=False)
+checks = {
+    "raw_rows": raw_rows,
+    "duplicate_rows_removed": duplicate_rows_removed,
+    "rows_after_dedup": len(raw_deduplicated),
+    "missing_distance_km_before": missing_distance_km_before,
+    "missing_parcel_weight_before": missing_parcel_weight_before,
+    "missing_declared_value_before": missing_declared_value_before,
+    "missing_payment_mode_before": missing_payment_mode_before,
+    "sentinel_weight_rows": sentinel_weight_rows,
+    "service_type_spellings_before": service_type_spellings_before,
+    "service_type_spellings_after": service_type_spellings_after,
+    "median_distance_km": medians["distance_km"],
+    "median_parcel_weight_kg": medians["parcel_weight_kg"],
+    "median_declared_value_inr": medians["declared_value_inr"],
+    "rows_after_hub_merge": rows_after_hub_merge,
+    "nulls_in_features_and_target": nulls_in_features_and_target,
+    "delayed_count": delayed_count,
+    "delay_rate": round(float(delay_rate), 4),
+    "declared_value_mean_inr": round(float(declared_value_mean_inr), 4),
+    "declared_value_median_inr": round(float(declared_value_median_inr), 4),
+    "log_declared_value_mean": round(float(log_declared_value_mean), 4),
+    "log_declared_value_median": round(float(log_declared_value_median), 4),
+    "hours_q1": round(float(hours_q1), 4),
+    "hours_q3": round(float(hours_q3), 4),
+    "hours_iqr": round(float(hours_iqr), 4),
+    "hours_lower_bound": round(float(hours_lower_bound), 4),
+    "hours_upper_bound": round(float(hours_upper_bound), 4),
+    "hours_outlier_count": hours_outlier_count,
+}
 
-    # Data-quality checks
-    value = modelling["declared_value_inr"]
-    log_value = np.log(value)
-    q1 = modelling["delivery_hours"].quantile(0.25)
-    q3 = modelling["delivery_hours"].quantile(0.75)
-    iqr = q3 - q1
+checks_df = pd.DataFrame(
+    list(checks.items()),
+    columns=["metric", "value"],
+)
 
-    checks = {
-        "raw_rows": raw_rows,
-        "duplicate_rows_removed": duplicate_rows_removed,
-        "rows_after_dedup": rows_after_dedup,
-        "missing_distance_before": missing_distance_before,
-        "missing_parcel_weight_before": missing_weight_before,
-        "missing_declared_value_before": missing_declared_before,
-        "missing_payment_mode_before": missing_payment_before,
-        "service_type_spellings_before": service_spellings_before,
-        "service_type_spellings_after": service_spellings_after,
-        "median_distance_km": medians["distance_km"],
-        "median_parcel_weight_kg": medians["parcel_weight_kg"],
-        "median_declared_value_inr": medians["declared_value_inr"],
-        "nulls_in_features_and_target": modelling[
-            FEATURES + ["delivery_hours", "is_delayed"]
-        ].isna().sum().sum(),
-        "declared_value_mean_inr": value.mean(),
-        "declared_value_median_inr": value.median(),
-        "log_declared_value_mean": log_value.mean(),
-        "log_declared_value_median": log_value.median(),
-        "hours_q1": q1,
-        "hours_q3": q3,
-        "hours_iqr": iqr,
-        "hours_lower_bound": q1 - 1.5 * iqr,
-        "hours_upper_bound": q3 + 1.5 * iqr,
-        "hours_outlier_count": (
-            (modelling["delivery_hours"] < q1 - 1.5 * iqr)
-            | (modelling["delivery_hours"] > q3 + 1.5 * iqr)
-        ).sum(),
-    }
+checks_df.to_csv(
+    OUTPUT_DIR / "part_a_checks.csv",
+    index=False,
+)
 
-    checks_df = pd.DataFrame(
-        list(checks.items()), columns=["metric", "value"]
+
+# --------------------------------------------------
+# 8. Save delay rates by group
+# --------------------------------------------------
+
+group_results = []
+
+
+def add_group_results(df, dimension, group_column):
+    """Calculate shipment counts and delay rates for each group."""
+
+    grouped = df.groupby(
+        group_column,
+        dropna=False,
+        observed=True,
     )
-    checks_df["value"] = pd.to_numeric(
-        checks_df["value"], errors="coerce"
-    ).round(4)
-    checks_df.to_csv(OUTPUTS / "part_a_checks.csv", index=False)
 
-    # Delay rates by service type and hub tier
-    group_tables = []
-
-    for dimension in ["service_type", "hub_tier"]:
-        grouped = modelling.groupby(dimension, observed=True).agg(
-            shipments=("shipment_id", "size"),
-            delayed=("is_delayed", "sum"),
-            mean_hours=("delivery_hours", "mean"),
-        ).reset_index()
-
-        grouped["delay_rate"] = grouped["delayed"] / grouped["shipments"]
-        grouped = grouped.rename(columns={dimension: "group"})
-        grouped.insert(0, "dimension", dimension)
-        group_tables.append(
-            grouped[
-                [
-                    "dimension", "group", "shipments",
-                    "delayed", "delay_rate", "mean_hours",
-                ]
-            ]
+    for group_name, group_df in grouped:
+        group_results.append(
+            {
+                "dimension": dimension,
+                "group": str(group_name),
+                "shipments": int(len(group_df)),
+                "delayed": int(group_df["is_delayed"].sum()),
+                "delay_rate": round(
+                    float(group_df["is_delayed"].mean()), 4
+                ),
+                "mean_hours": round(
+                    float(group_df["delivery_hours"].mean()), 4
+                ),
+            }
         )
 
-    # Distance bands: right edge inclusive
-    modelling["distance_band"] = pd.cut(
-        modelling["distance_km"],
-        bins=[0, 200, 400, 600, 2000],
-        labels=["0-200", "201-400", "401-600", "601+"],
-        right=True,
-        include_lowest=True,
-    )
 
-    grouped = modelling.groupby(
-        "distance_band", observed=False
-    ).agg(
-        shipments=("shipment_id", "size"),
-        delayed=("is_delayed", "sum"),
-        mean_hours=("delivery_hours", "mean"),
-    ).reset_index()
+# Service type
+add_group_results(
+    modelling,
+    "service_type",
+    "service_type",
+)
 
-    grouped["delay_rate"] = grouped["delayed"] / grouped["shipments"]
-    grouped = grouped.rename(columns={"distance_band": "group"})
-    grouped.insert(0, "dimension", "distance_band")
-    group_tables.append(
-        grouped[
-            [
-                "dimension", "group", "shipments",
-                "delayed", "delay_rate", "mean_hours",
-            ]
-        ]
-    )
+# Hub tier
+add_group_results(
+    modelling,
+    "hub_tier",
+    "hub_tier",
+)
 
-    delay_groups = pd.concat(group_tables, ignore_index=True)
-    delay_groups["delay_rate"] = delay_groups["delay_rate"].round(4)
-    delay_groups["mean_hours"] = delay_groups["mean_hours"].round(4)
-    delay_groups.to_csv(
-        OUTPUTS / "part_a_delay_by_group.csv", index=False
-    )
+# Distance bands
+modelling["distance_band"] = pd.cut(
+    modelling["distance_km"],
+    bins=[-np.inf, 200, 400, 600, np.inf],
+    labels=["0-200", "201-400", "401-600", "601+"],
+    right=True,
+)
 
-    # Correlation matrix for numeric columns
-    correlations = modelling.select_dtypes(
-        include="number"
-    ).corr().round(4)
-    correlations.to_csv(OUTPUTS / "part_a_correlations.csv")
+add_group_results(
+    modelling,
+    "distance_band",
+    "distance_band",
+)
 
-    print("Part A processing complete.")
-    print(f"Rows after deduplication: {len(modelling)}")
-    print(f"Feature columns: {len(FEATURES)}")
-    print("Created data/modelling_table.csv")
-    print("Created outputs/part_a_checks.csv")
-    print("Created outputs/part_a_delay_by_group.csv")
-    print("Created outputs/part_a_correlations.csv")
+group_results_df = pd.DataFrame(group_results)
+
+group_results_df.to_csv(
+    OUTPUT_DIR / "part_a_delay_by_group.csv",
+    index=False,
+)
 
 
-if __name__ == "__main__":
-    main()
+# --------------------------------------------------
+# 9. Save the modelling table
+# --------------------------------------------------
+
+modelling.to_csv(
+    DATA_DIR / "modelling_table.csv",
+    index=False,
+)
+
+
+# --------------------------------------------------
+# 10. Save the numeric correlation matrix
+# --------------------------------------------------
+
+correlation_matrix = modelling.corr(
+    numeric_only=True
+).round(4)
+
+correlation_matrix.index.name = "column"
+
+correlation_matrix.to_csv(
+    OUTPUT_DIR / "part_a_correlations.csv",
+    index=True,
+)
+
+
+# --------------------------------------------------
+# 11. Print a short completion summary
+# --------------------------------------------------
+
+print("Part A completed successfully.")
+print(f"Raw rows: {raw_rows}")
+print(f"Duplicate rows removed: {duplicate_rows_removed}")
+print(f"Rows after deduplication: {len(raw_deduplicated)}")
+print(f"Rows after hub merge: {rows_after_hub_merge}")
+print(f"Delayed shipments: {delayed_count}")
+print(f"Delay rate: {delay_rate:.4f}")
+print(f"Nulls in features and target: {nulls_in_features_and_target}")
+
+print("\nFiles created:")
+print("data/modelling_table.csv")
+print("outputs/part_a_checks.csv")
+print("outputs/part_a_delay_by_group.csv")
+print("outputs/part_a_correlations.csv")
+
+print("\nTop correlations with delivery_hours:")
+
+target_correlations = (
+    correlation_matrix["delivery_hours"]
+    .drop(labels=["delivery_hours"], errors="ignore")
+    .dropna()
+    .sort_values(key=lambda values: values.abs(), ascending=False)
+)
+
+print(target_correlations.head(3))
+
+

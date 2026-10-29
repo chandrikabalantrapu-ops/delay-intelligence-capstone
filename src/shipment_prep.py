@@ -9,27 +9,45 @@ PROMISED_HOURS = {
 }
 
 FEATURES = [
-    "promised_hours", "distance_km", "parcel_weight_kg",
-    "log_declared_value", "n_stops", "rain_flag",
-    "sale_event_flag", "is_cod", "is_weekend", "dispatch_hour",
-    "hub_tier", "hub_daily_capacity", "label_print_batch",
-    "scanner_build_no", "tape_roll_no", "sticker_serial_mod",
+    "promised_hours",
+    "distance_km",
+    "parcel_weight_kg",
+    "log_declared_value",
+    "n_stops",
+    "rain_flag",
+    "sale_event_flag",
+    "is_cod",
+    "is_weekend",
+    "dispatch_hour",
+    "hub_tier",
+    "hub_daily_capacity",
+    "label_print_batch",
+    "scanner_build_no",
+    "tape_roll_no",
+    "sticker_serial_mod",
     "shelf_slot_no",
 ]
 
 NOISE_COLUMNS = [
-    "label_print_batch", "scanner_build_no", "tape_roll_no",
-    "sticker_serial_mod", "shelf_slot_no",
+    "label_print_batch",
+    "scanner_build_no",
+    "tape_roll_no",
+    "sticker_serial_mod",
+    "shelf_slot_no",
 ]
 
 
 def clean_shipments(raw, medians=None):
-    """Clean shipment records and return cleaned data and medians."""
+    """Clean shipment data and return (clean_df, medians)."""
     df = raw.drop_duplicates().copy()
 
     df["service_type"] = (
-        df["service_type"].astype("string").str.strip().str.title()
+        df["service_type"]
+        .astype("string")
+        .str.strip()
+        .str.title()
     )
+
     df["payment_mode"] = df["payment_mode"].fillna("Unknown")
 
     df["declared_value_inr"] = pd.to_numeric(
@@ -45,7 +63,11 @@ def clean_shipments(raw, medians=None):
         df["dispatch_time"], errors="coerce"
     )
 
-    df.loc[df["parcel_weight_kg"] > 100, "parcel_weight_kg"] = np.nan
+    # Scanner-fault sentinel: values above 100 kg.
+    df.loc[
+        df["parcel_weight_kg"] > 100,
+        "parcel_weight_kg",
+    ] = np.nan
 
     median_columns = [
         "distance_km",
@@ -59,12 +81,17 @@ def clean_shipments(raw, medians=None):
             for col in median_columns
         }
     else:
+        expected_keys = set(median_columns)
+        if set(medians) != expected_keys:
+            raise ValueError(
+                f"medians must contain exactly: {median_columns}"
+            )
         medians = {
             col: float(medians[col])
             for col in median_columns
         }
 
-   
+    # Float conversion permits decimal medians in integer-like columns.
     for col in median_columns:
         df[col] = (
             pd.to_numeric(df[col], errors="coerce")
@@ -72,30 +99,34 @@ def clean_shipments(raw, medians=None):
             .fillna(medians[col])
         )
 
-
     return df, medians
 
 
 def build_features(clean, hubs):
-    """Attach hub information and create model features."""
+    """Attach hub information and construct the required features."""
+    hub_columns = [
+        "hub_id",
+        "hub_city",
+        "region",
+        "hub_tier",
+        "hub_daily_capacity",
+    ]
+
     df = clean.merge(
-        hubs[
-            [
-                "hub_id",
-                "hub_city",
-                "region",
-                "hub_tier",
-                "hub_daily_capacity",
-            ]
-        ],
+        hubs[hub_columns],
         on="hub_id",
         how="left",
         validate="many_to_one",
     )
 
     df["promised_hours"] = (
-        df["service_type"].map(PROMISED_HOURS).astype(int)
+        df["service_type"].map(PROMISED_HOURS)
     )
+
+    if df["promised_hours"].isna().any():
+        raise ValueError("Unexpected or missing service_type.")
+
+    df["promised_hours"] = df["promised_hours"].astype(int)
     df["is_cod"] = df["payment_mode"].eq("COD").astype(int)
     df["is_weekend"] = (
         df["dispatch_time"].dt.dayofweek >= 5
@@ -104,3 +135,4 @@ def build_features(clean, hubs):
     df["log_declared_value"] = np.log(df["declared_value_inr"])
 
     return df
+
