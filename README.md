@@ -8,7 +8,7 @@ CAPSTONE PROJECT
 
 3. **Distance:** Delay rates rise with distance: 0.0219 (2.19%) for 0–200 km, 0.1368 (13.68%) for 201–400 km, 0.4364 (43.64%) for 401–600 km, and 0.8523 (85.23%) for 601+ km.
 
-4. **Correlations with delivery time:** The three strongest correlations with `delivery_hours`, excluding the target itself, are `promised_hours` (+0.8372), `distance_km` (+0.4013), and `hub_tier` (+0.3175).
+4. **Correlations with delivery time:** The three strongest correlations with `delivery_hours`, excluding the target itself, are `promised_hours` (+0.8372), `distance_km` (+0.4013), and `n_stops` (+0.3247).
 
 5. **Declared-value transformation:** The median-filled `declared_value_inr` column has a mean of INR 1,533.0542 and a median of INR 1,121.5, while its natural-log transformation has a mean of 7.0277 and a median of 7.0224. The log transformation reduces the influence of the right-skewed declared-value distribution.
 ## Model results (regression)
